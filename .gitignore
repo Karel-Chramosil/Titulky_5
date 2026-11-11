@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+
+# Modely se stáhnou při prvním spuštění (soubory jsou větší než limit GitHubu).
+src/muj_projekt/models/
+
+# Průběžný záznam z posledního poslechu.
+titulky.srt

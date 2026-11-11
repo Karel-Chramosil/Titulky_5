@@ -1,0 +1,95 @@
+=============================================================
+ Vzorová struktura projektu Titulky_5
+=============================================================
+
+Kořen projektu je adresář, ve kterém leží spustit.bat.
+Odtud se program spouští. Kód je v src, návody v docs,
+hotové titulky a popis projektu zůstávají v kořeni.
+
+C:\Titulky_5\
+│
+├── spustit.bat
+│     Spuštění. Pozná počítač, připraví uv a Python a program nastartuje.
+│
+├── rozpoznat.ps1
+│     Rozliší NVIDIA, AMD, Intel s NPU a běžný Intel ještě před instalací.
+│
+├── requirements.txt
+│     Společné knihovny pro všechny počítače.
+│
+├── requirements-cuda.txt
+│     CUDA knihovny. Instalují se jen na NVIDIA.
+│
+├── titulky.srt
+│     Průběžně ukládané titulky. Jediný správný soubor, leží v kořeni.
+│
+├── PROJECT_CONTEXT.md
+│     Mapa pro opravy: tok programu, na co nesahat a kde hledat chybu.
+│
+├── Vzorová struktura projektů.txt
+│     Tento přehled adresářů.
+│
+├── .venv\
+│     Prostředí uv. Zakládá ho spustit.bat. Ručně se nemění a nemaže.
+│
+├── docs\
+│     Texty pro člověka, ne programový kód.
+│     ├── Navod.txt          návod ke spuštění a ovládání
+│     └── dar.pdf            dokument k položce Váš dar
+│
+└── src\muj_projekt\
+      Balík programu. Spouští se jako python -m muj_projekt.windous.
+      │
+      ├── windous.py
+      │     Řízení běhu: zvuk, přepis, překlad, ukládání a čtení.
+      │     Název souboru je schválně windous, aby se nesrazil se složkou windows.
+      │
+      ├── config\
+      │     Stálé hodnoty. Cesty, jazyky, názvy modelů, délky.
+      │     └── config.py
+      │
+      ├── windows\
+      │     Okno, ikony a práce se zvukem Windows.
+      │     ├── window.py         průhledné titulky a nabídka kolečka
+      │     ├── speak.py          české čtení, hlas Jakub, WASAPI
+      │     ├── audio_route.py    originál do kabelu, hlas do reproduktorů
+      │     ├── gear.png          ikona kolečka
+      │     ├── ear.png           ikona Číst CZ
+      │     ├── close.png         ikona ukončení
+      │     └── minus.png         ikona skrytí
+      │
+      ├── files\
+      │     Zápis do souborů.
+      │     └── writer.py         časové značky a titulky.srt
+      │
+      ├── print\
+      │     Výpisy do terminálu.
+      │     └── display.py        seznam zvukových zařízení
+      │
+      └── models\
+            Stažené modely. Složka se nepřesouvá a nemaže.
+            ├── models--Systran--faster-whisper-large-v3
+            │     Přepis na NVIDIA.
+            ├── models--Systran--faster-whisper-small
+            │     Přepis na procesoru, AMD a Intel.
+            └── hf\
+                  Překlad NLLB do češtiny.
+
+
+Kam co patří
+------------
+Nové nastavení a cesta k souboru          config\config.py
+Nové tlačítko nebo text v okně            windows\window.py
+Čtení, hlas, reproduktory a kabel         windows\speak.py a audio_route.py
+Ukládání titulků nebo jiného souboru      files\
+Text, který se má vypsat do terminálu     print\
+Stažený model                             models\
+Návod, pdf a podklady pro uživatele       docs\
+Spuštění a seznam knihoven                kořen projektu
+
+
+Co do projektu nepatří
+----------------------
+__pycache__ a soubory .pyc jsou jen mezivýsledek Pythonu.
+.venv je prostředí, ne zdrojový kód.
+Modely se nestěhují mimo models, jinak se při dalším startu stahují znovu.

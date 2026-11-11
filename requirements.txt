@@ -1,0 +1,10 @@
+faster-whisper>=1.2
+pyaudiowpatch==0.2.12.8
+pyaudio
+pywin32
+comtypes
+numpy>=1.26
+transformers>=4.40
+torch>=2.2
+safetensors>=0.5
+huggingface_hub>=0.23
