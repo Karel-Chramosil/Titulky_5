@@ -1,6 +1,6 @@
 # Titulky_5 — kontext pro další opravy
 
-Živé české titulky ze zvuku Windows. Na NVIDIA přepisuje Whisper large-v3 na grafice, jinde model small na procesoru. Překlad je lokální NLLB do češtiny a běží na procesoru. Hotový text jde do průhledného okna a do `titulky.srt`. Volitelně ho čte český hlas Jakub.
+Živé české titulky ze zvuku Windows. Na NVIDIA a AMD přepisuje Whisper large-v3 na grafice, jinde model small na procesoru. Překlad je lokální NLLB do češtiny a běží na procesoru. Hotový text jde do průhledného okna a do `titulky.srt`. Volitelně ho čte český hlas Jakub.
 
 Tento soubor je mapa projektu k 11. 11. 2026. Starší projekt `C:\Titulky_4_PC_RTX` je jiný program. Odtud se převzalo jen čtení a přepínání zvuku.
 
@@ -28,7 +28,7 @@ Po úspěšném startu se terminál minimalizuje. Obnoví se z hlavního panelu.
 | Profil | Kdy | Co se instaluje | Přepis |
 |---|---|---|---|
 | NVIDIA | v názvu karty je NVIDIA, i když je v počítači i Intel grafika | `requirements.txt` a `requirements-cuda.txt` | large-v3, CUDA float16, jinak int8 |
-| AMD | Radeon nebo AMD a žádná NVIDIA | jen `requirements.txt` | small, CPU int8 |
+| AMD | Radeon nebo AMD a žádná NVIDIA | `requirements.txt` a `requirements-amd.txt`, wheel ctranslate2 s ROCm | large-v3, ROCm float16, jinak int8_float16 |
 | INTEL_AI | Nova Lake, Arc nebo NPU a žádná NVIDIA ani Radeon | jen `requirements.txt` | small, CPU int8 |
 | INTEL | ostatní, včetně běžného Intelu s 32 GB RAM | jen `requirements.txt` | small, CPU int8 |
 
@@ -42,9 +42,11 @@ CUDA knihovny jsou jen pro Whisper přes ctranslate2:
 
 `enable_cuda_dlls()` v `windous.py` je musí přidat na PATH dřív, než se importuje ctranslate2. Bez `cublas64_12.dll` se CUDA přeskočí a nesmí se pak znovu zkoušet cuda int8, to umí viset.
 
+AMD nepoužívá CUDA knihovny. `instalovat_amd.ps1` stáhne ROCm runtime z `requirements-amd.txt` a nahradí PyPI ctranslate2 wheelem z vydání 4.9.0, ve kterém je jádro pro gfx1151 (Radeon 8060S). V ctranslate2 se AMD karta hlásí jako zařízení `cuda`. `enable_rocm_dlls()` přidá `hipblas.dll`. Když `cublas64_12.dll` chybí a `hipblas.dll` je, přepis jde na AMD grafiku, ne na procesor. Na počítači s NVIDIA se ROCm wheel neinstaluje a zůstává CUDA.
+
 PyTorch se instaluje jako CPU verze a jen když v prostředí ještě není. Překlad NLLB na ní stojí. Nepřepínat ho na CUDA torch, pokud o to není výslovně požádáno. Velké stažení a může rozbít funkční překlad.
 
-Whisper z tohoto projektu nepoužívá Intel GPU ani NPU. Na AMD, Intelu a Nova Lake proto zůstává procesor.
+Whisper z tohoto projektu nepoužívá Intel GPU ani NPU. Na Intelu a Nova Lake proto zůstává procesor.
 
 ## Adresáře
 
@@ -52,8 +54,10 @@ Whisper z tohoto projektu nepoužívá Intel GPU ani NPU. Na AMD, Intelu a Nova 
 C:\Titulky_5\
 ├── spustit.bat
 ├── rozpoznat.ps1
+├── instalovat_amd.ps1
 ├── requirements.txt
 ├── requirements-cuda.txt
+├── requirements-amd.txt
 ├── titulky.srt                 # jediný správný soubor titulků
 ├── docs\dar.pdf                # otevře položka Váš dar
 ├── PROJECT_CONTEXT.md
@@ -140,6 +144,7 @@ Kód čtení a přepínání je převzatý z `Titulky_4_PC_RTX\titulky\speak.py`
 |---|---|
 | Dávka se hned zavře | `spustit.bat`, závorky v `echo` nebo `\|` a `)` z názvu karty |
 | CUDA se nepoužije, chybí `cublas64_12.dll` | `requirements-cuda.txt`, `enable_cuda_dlls()` |
+| AMD přepisuje na procesoru | `instalovat_amd.ps1`, `prepare_gpu()` musí vrátit `hip` |
 | Titulky anglicky, v logu `torch is not defined` | `Translator.translate`, import torch i uvnitř metody |
 | Pořád dokola varování max_length | `generation_config.max_length = None` |
 | Text není vidět nebo okno není průhledné | color key a `WS_EX_TRANSPARENT` v `_click_through` |

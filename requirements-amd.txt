@@ -1,0 +1,4 @@
+# Jen pro AMD. Whisper pres ctranslate2 s ROCm, ne pres torch.
+# Wheel ctranslate2 s ROCm neni na PyPI. instalovat_amd.ps1 ho vezme z vydani 4.9.0.
+https://repo.radeon.com/rocm/windows/rocm-rel-7.2/rocm_sdk_core-7.2.0.dev0-py3-none-win_amd64.whl
+https://repo.radeon.com/rocm/windows/rocm-rel-7.2/rocm_sdk_libraries_custom-7.2.0.dev0-py3-none-win_amd64.whl

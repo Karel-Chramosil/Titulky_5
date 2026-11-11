@@ -48,9 +48,15 @@ if /I "%HW%"=="NVIDIA" (
   uv pip install -r requirements-cuda.txt --python .venv\Scripts\python.exe
   if errorlevel 1 goto fail
 )
-if /I not "%HW%"=="NVIDIA" (
-  echo Bez CUDA knihoven. Prepis pobezi na procesoru.
+if /I "%HW%"=="AMD" (
+  echo Instaluji ROCm knihovny pro AMD grafiku...
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0instalovat_amd.ps1"
+  if errorlevel 1 goto fail
 )
+if /I "%HW%"=="INTEL" echo Bez grafickych knihoven. Prepis pobezi na procesoru.
+if /I "%HW%"=="INTEL_AI" echo Bez grafickych knihoven. Prepis pobezi na procesoru.
+
+set KMP_DUPLICATE_LIB_OK=TRUE
 
 set PYTHONPATH=src
 echo Spoustim program...

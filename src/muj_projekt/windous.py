@@ -1,7 +1,8 @@
 """Titulky_5 — přepis zvuku z počítače do českých titulků (SRT).
 
 Zdrojové jazyky: angličtina (USA), evropské jazyky, čínština a japonština.
-Překlad běží lokálně přes NLLB-200 → čeština. Na procesoru přepisuje Whisper small.
+Překlad běží lokálně přes NLLB-200 → čeština. Na NVIDIA a AMD přepisuje
+Whisper large-v3 na grafice, jinak small na procesoru.
 
 Spuštění:
   spustit.bat
@@ -13,6 +14,9 @@ import argparse
 import ctypes
 import logging
 import os
+
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import queue
 import sys
 import threading
@@ -228,22 +232,70 @@ class Translator:
         return self.tokenizer.decode(out[0], skip_special_tokens=True).strip()
 
 
+def _add_bin_dir(bin_dir) -> None:
+    from pathlib import Path
+    path = Path(bin_dir)
+    if not path.is_dir():
+        return
+    try:
+        os.add_dll_directory(str(path))
+    except (OSError, AttributeError):
+        pass
+    os.environ["PATH"] = str(path) + os.pathsep + os.environ.get("PATH", "")
+
+
 def enable_cuda_dlls() -> None:
-    """Windows jinak knihovny CUDA z prostředí nenajde."""
+    """Windows jinak knihovny CUDA z prostředí nenajde. Bez nich se nic neděje."""
     import importlib.util
     from pathlib import Path
+    if importlib.util.find_spec("nvidia") is None:
+        return
     for pkg in ("nvidia.cublas", "nvidia.cuda_runtime", "nvidia.cuda_nvrtc", "nvidia.cudnn"):
-        spec = importlib.util.find_spec(pkg)
+        try:
+            spec = importlib.util.find_spec(pkg)
+        except ModuleNotFoundError:
+            continue
         locations = list(spec.submodule_search_locations) if spec and spec.submodule_search_locations else []
         for location in locations:
-            bin_dir = Path(location) / "bin"
-            if not bin_dir.is_dir():
-                continue
-            try:
-                os.add_dll_directory(str(bin_dir))
-            except (OSError, AttributeError):
-                pass
-            os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+            _add_bin_dir(Path(location) / "bin")
+
+
+def enable_rocm_dlls() -> None:
+    """Windows jinak knihovny ROCm z prostředí nenajde. Bez nich se nic neděje."""
+    from pathlib import Path
+    site = Path(sys.prefix) / "Lib" / "site-packages"
+    _add_bin_dir(site / "_rocm_sdk_core" / "bin")
+    for bin_dir in sorted(site.glob("_rocm_sdk_libraries*/bin")):
+        _add_bin_dir(bin_dir)
+    hip = os.environ.get("HIP_PATH")
+    if hip:
+        _add_bin_dir(Path(hip) / "bin")
+
+
+def _dll_loads(name: str) -> bool:
+    try:
+        ctypes.WinDLL(name)
+        return True
+    except OSError:
+        return False
+
+
+def prepare_gpu() -> str | None:
+    """cuda = NVIDIA, hip = AMD. missing-cublas = karta je vidět, runtime ne. Jinak None."""
+    enable_cuda_dlls()
+    enable_rocm_dlls()
+    try:
+        import ctranslate2
+        devices = ctranslate2.get_cuda_device_count()
+    except Exception:
+        return None
+    if devices <= 0:
+        return None
+    if _dll_loads("cublas64_12.dll"):
+        return "cuda"
+    if _dll_loads("hipblas.dll") or _dll_loads("amdhip64_7.dll"):
+        return "hip"
+    return "missing-cublas"
 
 
 def minimize_console() -> None:
@@ -253,36 +305,29 @@ def minimize_console() -> None:
 
 
 def gpu_available() -> bool:
-    try:
-        enable_cuda_dlls()
-        import ctranslate2
-        return ctranslate2.get_cuda_device_count() > 0
-    except Exception:
-        return False
+    return prepare_gpu() in ("cuda", "hip")
 
 
 def create_whisper(gpu_only: bool = False) -> tuple[str, object]:
-    enable_cuda_dlls()
-    import ctranslate2
     from faster_whisper import WhisperModel
     cpu_threads = max(4, min(8, os.cpu_count() or 4))
-    cuda_ok = False
-    if ctranslate2.get_cuda_device_count() > 0:
-        try:
-            ctypes.WinDLL("cublas64_12.dll")
-            cuda_ok = True
-        except OSError:
-            print("Grafická karta se nepoužije: v prostředí není cublas64_12.dll. Přepis běží na procesoru.")
+    backend = prepare_gpu()
+    if backend == "missing-cublas":
+        print("Grafická karta se nepoužije: v prostředí není cublas64_12.dll. Přepis běží na procesoru.")
+        backend = None
     attempts: list[tuple[str, str, str]] = []
-    if cuda_ok:
-        attempts.extend([(WHISPER_MODEL, "cuda", "float16"), (WHISPER_MODEL, "cuda", "int8")])
+    if backend in ("cuda", "hip"):
+        # Na AMD je v ctranslate2 stejné zařízení cuda. int8 bez cublas na NVIDIA visí, proto se tam nespouští.
+        fallback = "int8" if backend == "cuda" else "int8_float16"
+        attempts.extend([(WHISPER_MODEL, "cuda", "float16"), (WHISPER_MODEL, "cuda", fallback)])
     if not gpu_only:
         attempts.append((CPU_WHISPER_MODEL, "cpu", "int8"))
     last_error: Exception | None = None
     for name, device, compute in attempts:
         try:
             model = WhisperModel(name, device=device, compute_type=compute, cpu_threads=cpu_threads if device == "cpu" else 4, num_workers=1, download_root=str(MODELS_DIR))
-            return f"Whisper {name} {device}/{compute}", model
+            shown = "amd" if backend == "hip" and device == "cuda" else device
+            return f"Whisper {name} {shown}/{compute}", model
         except Exception as exc:
             last_error = exc
             log.warning("Whisper %s %s/%s nejde použít: %s", name, device, compute, exc)
