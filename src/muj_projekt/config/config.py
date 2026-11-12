@@ -4,10 +4,13 @@ PACKAGE_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PACKAGE_DIR.parents[1]
 MODELS_DIR = PACKAGE_DIR / "models"
 SRT_PATH = PROJECT_ROOT / "titulky.srt"
+ORIGINAL_SRT_PATH = PROJECT_ROOT / "original.srt"
 
 TARGET_RATE = 16_000
 WHISPER_MODEL = "large-v3"
 CPU_WHISPER_MODEL = "small"
+# large-v3 v INT8 pro Intel Arc. Běží v OpenVINO na sdílené paměti grafiky.
+INTEL_WHISPER_REPO = "OpenVINO/whisper-large-v3-int8-ov"
 NLLB_TARGET = "ces_Latn"
 
 # Klíč = kód Whisperu, hodnota = (kód NLLB, popisek).

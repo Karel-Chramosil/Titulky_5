@@ -11,6 +11,7 @@ class SrtWriter:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.blocks: list[tuple[str, str, str]] = []  # (start, end, text)
+        self.path.write_text("", encoding="utf-8")
 
     def add(self, start: float, end: float, text: str) -> None:
         if not text.strip():

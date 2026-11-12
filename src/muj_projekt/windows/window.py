@@ -40,9 +40,13 @@ class SubtitleOverlay:
         self.root.update_idletasks()
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
+        import tkinter.font as tkfont
+        self._line_px = tkfont.Font(self.root, font=self.font).metrics("linespace")
 
-        self.width = screen_width // 3
-        self.height = 200
+        self.width = screen_width // 3 + 500
+        # Dva úvodní řádky musejí být nad sebou. Na vysokém DPI je písmo vyšší než původní mezera.
+        intro_gap = 12
+        self.height = max(210, self._line_px * 2 + intro_gap + 8 + self.outline_px)
         self.x = (screen_width - self.width) // 2
         self.y = screen_height - self.height - 120
         self.root.geometry(f"{self.width}x{self.height}+{self.x}+{self.y}")
@@ -150,8 +154,10 @@ class SubtitleOverlay:
     def _paint_intro(self) -> None:
         self.canvas.delete("all")
         x = self.width // 2
-        self._draw_line("softrobot.cz", x, self.height - 8, "#ff2a2a")
-        self._draw_line("Program Titulky - zdarma", x, self.height - 56, "white")
+        red_y = self.height - 8
+        white_y = red_y - self._line_px - 12
+        self._draw_line("Program Titulky - zdarma", x, white_y, "white")
+        self._draw_line("softrobot.cz", x, red_y, "#ff2a2a")
 
     def _render_caption(self, text: str) -> None:
         self.canvas.delete("all")

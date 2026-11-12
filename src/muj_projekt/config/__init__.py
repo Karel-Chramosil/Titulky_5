@@ -1,8 +1,10 @@
 from .config import (
     CPU_WHISPER_MODEL,
+    INTEL_WHISPER_REPO,
     MODELS_DIR,
     NLLB_SOURCES,
     NLLB_TARGET,
+    ORIGINAL_SRT_PATH,
     PACKAGE_DIR,
     PROJECT_ROOT,
     SRT_PATH,
@@ -12,9 +14,11 @@ from .config import (
 
 __all__ = [
     "CPU_WHISPER_MODEL",
+    "INTEL_WHISPER_REPO",
     "MODELS_DIR",
     "NLLB_SOURCES",
     "NLLB_TARGET",
+    "ORIGINAL_SRT_PATH",
     "PACKAGE_DIR",
     "PROJECT_ROOT",
     "SRT_PATH",

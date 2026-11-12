@@ -1,8 +1,8 @@
 """Titulky_5 — přepis zvuku z počítače do českých titulků (SRT).
 
 Zdrojové jazyky: angličtina (USA), evropské jazyky, čínština a japonština.
-Překlad běží lokálně přes NLLB-200 → čeština. Na NVIDIA a AMD přepisuje
-Whisper large-v3 na grafice, jinak small na procesoru.
+Překlad běží lokálně přes NLLB-200 → čeština. Na NVIDIA, AMD a Intel Arc
+přepisuje Whisper large-v3 na grafice, jinak small na procesoru.
 
 Spuštění:
   spustit.bat
@@ -16,6 +16,10 @@ import logging
 import os
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# hf-xet na Windows spojení často shodí (WinError 10054) a model se nestáhne.
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
+os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
 
 import queue
 import sys
@@ -27,9 +31,11 @@ import numpy as np
 
 from .config import (
     CPU_WHISPER_MODEL,
+    INTEL_WHISPER_REPO,
     MODELS_DIR,
     NLLB_SOURCES,
     NLLB_TARGET,
+    ORIGINAL_SRT_PATH,
     SRT_PATH,
     TARGET_RATE,
     WHISPER_MODEL,
@@ -304,8 +310,188 @@ def minimize_console() -> None:
         ctypes.windll.user32.ShowWindow(hwnd, 6)
 
 
+_INTEL_GPU_UNSET = object()
+_intel_gpu_cache: str | None | object = _INTEL_GPU_UNSET
+
+
 def gpu_available() -> bool:
-    return prepare_gpu() in ("cuda", "hip")
+    return prepare_gpu() in ("cuda", "hip") or prepare_intel_gpu() is not None
+
+
+def _gpu_memory_gb(core, device: str) -> float | None:
+    for key in ("GPU_DEVICE_TOTAL_MEM_SIZE", "GPU_MEMORY_STATISTICS"):
+        try:
+            value = core.get_property(device, key)
+        except Exception:
+            continue
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value) / (1024 ** 3)
+        if isinstance(value, dict):
+            total = value.get("max_allocated_memory") or value.get("total")
+            if isinstance(total, (int, float)) and total > 0:
+                return float(total) / (1024 ** 3)
+    return None
+
+
+def prepare_intel_gpu() -> str | None:
+    """Zařízení OpenVINO pro Intel Arc. Sdílená paměť se použije sama. Jinak None."""
+    global _intel_gpu_cache
+    if _intel_gpu_cache is not _INTEL_GPU_UNSET:
+        return _intel_gpu_cache  # type: ignore[return-value]
+    try:
+        import openvino as ov
+    except Exception:
+        _intel_gpu_cache = None
+        return None
+    try:
+        core = ov.Core()
+        names = [str(device) for device in core.available_devices if str(device).upper().startswith("GPU")]
+    except Exception:
+        _intel_gpu_cache = None
+        return None
+    if not names:
+        print("OpenVINO Intel grafiku nevidí. Přepis běží na procesoru.")
+        _intel_gpu_cache = None
+        return None
+    chosen = "GPU" if "GPU" in names else names[0]
+    full = ""
+    for name in names:
+        try:
+            full_name = str(core.get_property(name, "FULL_DEVICE_NAME"))
+        except Exception:
+            full_name = ""
+        if "Arc" in full_name:
+            chosen = "GPU" if name == "GPU" else name
+            full = full_name
+            break
+        if not full:
+            full = full_name
+            chosen = "GPU" if name == "GPU" else name
+    mem = _gpu_memory_gb(core, chosen)
+    label = full or chosen
+    if mem:
+        print(f"Intel grafika: {label}, sdílená paměť {mem:.1f} GB")
+    else:
+        print(f"Intel grafika: {label}")
+    _intel_gpu_cache = chosen
+    return chosen
+
+
+def _snapshot_ready(dest) -> bool:
+    from pathlib import Path
+    folder = Path(dest)
+    needed = ("openvino_encoder_model.xml", "openvino_decoder_model.xml")
+    return all((folder / name).is_file() for name in needed)
+
+
+def _download_error(exc: BaseException) -> bool:
+    text = str(exc).casefold()
+    return any(mark in text for mark in ("connecterror", "10054", "snapshot", "huggingface", "timed out", "connection"))
+
+
+def download_snapshot(repo_id: str, dest) -> None:
+    """Stáhne model. Když server spojení shodí, zkusí to znovu a naváže na rozjeté soubory."""
+    from pathlib import Path
+    folder = Path(dest)
+    if _snapshot_ready(folder):
+        return
+    folder.mkdir(parents=True, exist_ok=True)
+    from huggingface_hub import snapshot_download
+    last_error: Exception | None = None
+    for attempt in range(4):
+        try:
+            snapshot_download(repo_id, local_dir=str(folder), max_workers=1)
+            if _snapshot_ready(folder):
+                return
+            last_error = RuntimeError(f"V {folder} chybí soubory modelu {repo_id}.")
+        except Exception as exc:
+            last_error = exc
+            log.warning("Stažení %s, pokus %s: %s", repo_id, attempt + 1, exc)
+        time.sleep(2 * (attempt + 1))
+    raise RuntimeError(f"Model {repo_id} se nestáhl: {last_error}")
+
+
+class _WhisperSegment:
+    def __init__(self, text: str, start: float, end: float) -> None:
+        self.text = text
+        self.start = start
+        self.end = end
+
+
+class _WhisperInfo:
+    def __init__(self, language: str, language_probability: float) -> None:
+        self.language = language
+        self.language_probability = language_probability
+
+
+def _language_code(value: str) -> str:
+    text = (value or "").strip().lower()
+    if text.startswith("<|") and text.endswith("|>"):
+        return text[2:-2]
+    return text
+
+
+class IntelWhisper:
+    """Stejné rozhraní jako faster-whisper, výpočet jede na Intel Arc přes OpenVINO."""
+
+    def __init__(self, pipeline) -> None:
+        self._pipe = pipeline
+
+    def transcribe(self, audio, language=None, **_ignored):
+        samples = np.ascontiguousarray(audio, dtype=np.float32).reshape(-1)
+        if samples.size < TARGET_RATE // 10:
+            return [], _WhisperInfo(_language_code(language or ""), 0.0)
+        if float(np.sqrt(np.mean(samples * samples))) < 0.002:
+            return [], _WhisperInfo(_language_code(language or ""), 0.0)
+        options = {"return_timestamps": True, "task": "transcribe", "num_beams": 1}
+        code = _language_code(language or "")
+        if code:
+            options["language"] = code
+        result = self._pipe.generate(samples.tolist(), **options)
+        detected = _language_code(str(getattr(result, "language", "") or code))
+        segments = []
+        for chunk in _whisper_chunks(result):
+            text = str(getattr(chunk, "text", "") or "").strip()
+            if not text:
+                continue
+            start = float(getattr(chunk, "start_ts", 0.0) or 0.0)
+            end = float(getattr(chunk, "end_ts", -1.0))
+            if end < start:
+                end = start + 0.4
+            segments.append(_WhisperSegment(text, start, end))
+        if not segments:
+            texts = list(getattr(result, "texts", None) or [])
+            text = str(texts[0]).strip() if texts else ""
+            if text:
+                segments.append(_WhisperSegment(text, 0.0, samples.size / TARGET_RATE))
+        probability = 1.0 if detected else 0.0
+        return segments, _WhisperInfo(detected, probability)
+
+
+def _whisper_chunks(result) -> list:
+    chunks = getattr(result, "chunks", None)
+    if not chunks:
+        return []
+    first = chunks[0]
+    if hasattr(first, "text"):
+        return list(chunks)
+    if isinstance(first, (list, tuple)):
+        return list(first)
+    return list(chunks)
+
+
+def load_intel_whisper(device: str) -> IntelWhisper:
+    import openvino_genai as ov_genai
+    dest = MODELS_DIR / "whisper-large-v3-int8-ov"
+    if not _snapshot_ready(dest):
+        print("Stahuji Whisper large-v3 pro Intel Arc, chvíli to trvá...")
+    download_snapshot(INTEL_WHISPER_REPO, dest)
+    try:
+        pipe = ov_genai.WhisperPipeline(str(dest), device, PERFORMANCE_HINT="LATENCY")
+    except Exception as exc:
+        log.warning("OpenVINO bez PERFORMANCE_HINT: %s", exc)
+        pipe = ov_genai.WhisperPipeline(str(dest), device)
+    return IntelWhisper(pipe)
 
 
 def create_whisper(gpu_only: bool = False) -> tuple[str, object]:
@@ -315,6 +501,18 @@ def create_whisper(gpu_only: bool = False) -> tuple[str, object]:
     if backend == "missing-cublas":
         print("Grafická karta se nepoužije: v prostředí není cublas64_12.dll. Přepis běží na procesoru.")
         backend = None
+    last_error: Exception | None = None
+    if backend not in ("cuda", "hip"):
+        intel = prepare_intel_gpu()
+        if intel:
+            try:
+                return f"Whisper large-v3 {intel}/int8", load_intel_whisper(intel)
+            except Exception as exc:
+                last_error = exc
+                log.warning("Whisper Intel %s nejde použít: %s", intel, exc)
+                print("Intel Arc se nepoužije. Přepis běží na procesoru.")
+                if gpu_only:
+                    raise RuntimeError(f"Whisper load failed: {exc}") from exc
     attempts: list[tuple[str, str, str]] = []
     if backend in ("cuda", "hip"):
         # Na AMD je v ctranslate2 stejné zařízení cuda. int8 bez cublas na NVIDIA visí, proto se tam nespouští.
@@ -322,16 +520,20 @@ def create_whisper(gpu_only: bool = False) -> tuple[str, object]:
         attempts.extend([(WHISPER_MODEL, "cuda", "float16"), (WHISPER_MODEL, "cuda", fallback)])
     if not gpu_only:
         attempts.append((CPU_WHISPER_MODEL, "cpu", "int8"))
-    last_error: Exception | None = None
     for name, device, compute in attempts:
-        try:
-            model = WhisperModel(name, device=device, compute_type=compute, cpu_threads=cpu_threads if device == "cpu" else 4, num_workers=1, download_root=str(MODELS_DIR))
-            shown = "amd" if backend == "hip" and device == "cuda" else device
-            return f"Whisper {name} {shown}/{compute}", model
-        except Exception as exc:
-            last_error = exc
-            log.warning("Whisper %s %s/%s nejde použít: %s", name, device, compute, exc)
-            continue
+        for attempt in range(3):
+            try:
+                model = WhisperModel(name, device=device, compute_type=compute, cpu_threads=cpu_threads if device == "cpu" else 4, num_workers=1, download_root=str(MODELS_DIR))
+                shown = "amd" if backend == "hip" and device == "cuda" else device
+                return f"Whisper {name} {shown}/{compute}", model
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2 and _download_error(exc):
+                    log.warning("Whisper %s %s/%s, pokus %s: %s", name, device, compute, attempt + 1, exc)
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                log.warning("Whisper %s %s/%s nejde použít: %s", name, device, compute, exc)
+                break
     raise RuntimeError(f"Whisper load failed: {last_error}")
 
 
@@ -374,6 +576,28 @@ class AudioBuffer:
         return np.concatenate(frames).astype(np.float32, copy=False), first_at
 
 
+_FILLER_CORE = {
+    "ne", "no", "ano", "yes",
+    "děkuji", "dekuji", "díky", "diky",
+    "thank", "thanks",
+}
+_FILLER_EXTRA = _FILLER_CORE | {"vám", "vam", "you"}
+
+
+def _words(text: str) -> list[str]:
+    words: list[str] = []
+    token: list[str] = []
+    for char in text.casefold():
+        if char.isalpha():
+            token.append(char)
+        elif token:
+            words.append("".join(token))
+            token = []
+    if token:
+        words.append("".join(token))
+    return words
+
+
 def is_spelled_noise(text: str) -> bool:
     """Whisper občas při šumu vyhláskuje jedno písmeno pořád dokola: E-E-E-E."""
     parts = [part.strip(" .,!?:;\"'").upper() for part in text.replace("—", "-").split("-")]
@@ -385,6 +609,30 @@ def is_spelled_noise(text: str) -> bool:
         return False
     top = max(letters.count(letter) for letter in set(letters))
     return top >= 8 and top >= len(letters) * 0.7
+
+
+def is_filler_turn(text: str) -> bool:
+    """Při tichu přepis vymyslí krátkou výměnu: „- Ne, ne.“ nebo „- Děkuji vám. - Děkuji.“"""
+    raw = " ".join(text.replace("—", "-").replace("–", "-").split())
+    if not raw.startswith("-") and " - " not in raw:
+        return False
+    body = raw[1:].strip() if raw.startswith("-") else raw
+    parts = [part.strip() for part in body.split(" - ") if part.strip()]
+    if not parts:
+        return False
+    for part in parts:
+        words = _words(part)
+        if not words or len(words) > 3:
+            return False
+        if any(word not in _FILLER_EXTRA for word in words):
+            return False
+        if not any(word in _FILLER_CORE for word in words):
+            return False
+    return True
+
+
+def is_skipped_caption(text: str) -> bool:
+    return is_spelled_noise(text) or is_filler_turn(text)
 
 
 class ChunkSeconds:
@@ -403,7 +651,7 @@ class ChunkSeconds:
             self._seconds = max(1, min(12, int(seconds)))
 
 
-def run_processing(cap, translator, srt, lang_arg, model, audio: AudioBuffer, subtitle_queue: queue.Queue, chunk_seconds: ChunkSeconds):
+def run_processing(cap, translator, srt, original, lang_arg, model, audio: AudioBuffer, subtitle_queue: queue.Queue, chunk_seconds: ChunkSeconds):
     origin: float | None = None
     locked_lang = lang_arg
     try:
@@ -438,7 +686,7 @@ def run_processing(cap, translator, srt, lang_arg, model, audio: AudioBuffer, su
             chunk_end = offset + len(chunk) / TARGET_RATE
             for seg in segments:
                 text = (seg.text or "").strip()
-                if not text or is_spelled_noise(text):
+                if not text or is_skipped_caption(text):
                     if text:
                         log.warning("Přeskočen přelud přepisu: %s", text[:80])
                     continue
@@ -452,16 +700,18 @@ def run_processing(cap, translator, srt, lang_arg, model, audio: AudioBuffer, su
                     log.error("Překlad selhal: %s", exc)
                     translated = text
                 shown = translated or text
-                if is_spelled_noise(shown):
+                if is_skipped_caption(shown):
                     log.warning("Přeskočen přelud přepisu: %s", shown[:80])
                     continue
                 srt.add(start, end, shown)
+                original.add(start, end, text)
                 subtitle_queue.put(shown)
     except Exception as exc:
         log.error("Zpracování skončilo: %s", exc)
     finally:
         cap.stop()
         srt.flush()
+        original.flush()
 
 
 class CzechReader:
@@ -660,13 +910,15 @@ def main() -> None:
     overlay.set_on_read_toggle(reader.toggle)
 
     srt = SrtWriter(SRT_PATH)
+    original = SrtWriter(ORIGINAL_SRT_PATH)
     print(f"Titulky se ukládají do {SRT_PATH}")
+    print(f"Originál se ukládá do {ORIGINAL_SRT_PATH}")
     print("Terminál se minimalizuje. Obnovíte ho z hlavního panelu, zastavíte klávesami Ctrl+C.")
     minimize_console()
 
     proc_thread = threading.Thread(
         target=run_processing,
-        args=(cap, translator, srt, args.lang, model, audio, subtitle_queue, chunk_seconds),
+        args=(cap, translator, srt, original, args.lang, model, audio, subtitle_queue, chunk_seconds),
         daemon=True,
     )
     proc_thread.start()

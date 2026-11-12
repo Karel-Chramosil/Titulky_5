@@ -1,0 +1,4 @@
+# Jen pro Intel Arc / Core Ultra. Whisper large-v3 pres OpenVINO na grafice.
+openvino>=2026.1
+openvino-genai>=2026.1
+openvino-tokenizers>=2026.1

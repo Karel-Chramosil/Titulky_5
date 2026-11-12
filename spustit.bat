@@ -5,6 +5,9 @@ chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
 set PYTHONUNBUFFERED=1
+set HF_HUB_DISABLE_XET=1
+set HF_HUB_DOWNLOAD_TIMEOUT=120
+set HF_HUB_ETAG_TIMEOUT=30
 
 where uv >nul 2>&1
 if errorlevel 1 (
@@ -54,9 +57,15 @@ if /I "%HW%"=="AMD" (
   if errorlevel 1 goto fail
 )
 if /I "%HW%"=="INTEL" echo Bez grafickych knihoven. Prepis pobezi na procesoru.
-if /I "%HW%"=="INTEL_AI" echo Bez grafickych knihoven. Prepis pobezi na procesoru.
+if /I "%HW%"=="INTEL_AI" (
+  echo Instaluji OpenVINO pro Intel Arc. Prepis pobezi na grafice.
+  uv pip install -r requirements-intel.txt --python .venv\Scripts\python.exe
+  if errorlevel 1 goto fail
+)
 
 set KMP_DUPLICATE_LIB_OK=TRUE
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0zastupce.ps1"
 
 set PYTHONPATH=src
 echo Spoustim program...
