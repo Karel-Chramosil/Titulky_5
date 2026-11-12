@@ -4,7 +4,14 @@ Přepis zvuku z počítače do českých titulků.
 
 ## Co program dělá
 
-Poslouchá zvuk, který hraje ve Windows, řeč přepíše a přeloží do češtiny. Titulky se ukazují v průhledném okně dole na obrazovce a průběžně se zapisují do souboru `C:\Titulky_5\titulky.srt`.
+Poslouchá zvuk, který hraje ve Windows, řeč přepíše a přeloží do češtiny. Titulky se ukazují v průhledném okně dole na obrazovce a průběžně se zapisují do dvou souborů:
+
+- `C:\Titulky_5\titulky.srt` — český překlad
+- `C:\Titulky_5\original.srt` — záznam v originálním jazyku
+
+Po startu programu se oba soubory vyprázdní a záznam začne znovu. Text, který si chcete nechat, zkopírujte ještě před dalším spuštěním.
+
+Se soubory můžete pracovat. Vložte je do AI a nechte si vypsat stručný obsah, děj filmu nebo text písně.
 
 Překlad běží v počítači, nepřipojuje se na internetovou službu. Zdrojové jazyky jsou angličtina, němčina, francouzština, španělština, italština, polština, čínština a japonština. Bez volby jazyka ho program pozná sám.
 
@@ -66,7 +73,7 @@ Vpravo od titulků je ozubené kolečko. Kliknutí otevře nabídku.
 
 Po startu je rychlost čtení 1,3× a délka konverzace 2 sekundy. Délka jde od 1 do 12 sekund. Na 1 s je šipka dolů neaktivní, na 12 s je neaktivní šipka nahoru.
 
-Kratší úsek ukáže text dřív a hodí se k poslechu. Delší úsek nechá větu doběhnout a hodí se k záznamu do `titulky.srt`.
+Kratší úsek ukáže text dřív a hodí se k poslechu. Delší úsek nechá větu doběhnout a hodí se k záznamu do `titulky.srt` a `original.srt`.
 
 Kolečko zůstane na místě i po skrytí titulků, aby šly znovu zapnout.
 
@@ -88,6 +95,7 @@ Je potřeba nainstalovaný VB-Audio Virtual Cable a ve Windows český hlas Jaku
 | `rozpoznat.ps1` | rozpoznání počítače |
 | `requirements.txt` | společné knihovny |
 | `requirements-cuda.txt` | CUDA knihovny, jen pro NVIDIA |
-| `titulky.srt` | uložené titulky |
+| `titulky.srt` | český překlad, po startu se maže |
+| `original.srt` | originál, po startu se maže |
 | `docs\dar.pdf` | text k položce Váš dar |
 | `docs\Navod.txt` | tento návod v prostém textu |
