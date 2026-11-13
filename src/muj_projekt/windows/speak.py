@@ -145,7 +145,7 @@ class Speaker:
 
     def __init__(self) -> None:
         self.enabled = False
-        self.rate = 3
+        self.rate = 6
         self.volume = 55
         self.device_index: int | None = None
         self.device_rate = 48_000

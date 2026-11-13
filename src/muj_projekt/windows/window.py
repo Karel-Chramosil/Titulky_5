@@ -55,8 +55,10 @@ class SubtitleOverlay:
         self._menu_open = False
         self._reading = False
         self._on_read_toggle = None
-        self._speed_label = "1,3×"
+        self._speed_label = "1,6×"
         self._on_speed = None
+        self._volume = 55
+        self._on_volume = None
         self._length = 2
         self._on_length = None
         self._intro = False
@@ -272,12 +274,14 @@ class SubtitleOverlay:
             "plus": self._plus_raster(minus),
             "ear": self._icon_raster(folder / "ear.png", (26, 23, 51, 58), icon_size),
         }
-        self._menu_rows = (
+        rows = [
             self._menu_row("x", "Ukončit", self.quit_app),
             self._menu_row("minus", "Skrýt", self.toggle_visibility),
             self._menu_row("ear", "Číst CZ", self.toggle_reading),
-            self._menu_row("gift", "Váš dar", self.open_gift),
-        )
+        ]
+        self._build_volume()
+        rows.append(self._menu_row("gift", "Váš dar", self.open_gift))
+        self._menu_rows = tuple(rows)
         self._build_speeds()
         self._build_length()
         self.menu.update_idletasks()
@@ -337,6 +341,65 @@ class SubtitleOverlay:
 
     def set_on_speed(self, callback) -> None:
         self._on_speed = callback
+
+    def _build_volume(self) -> None:
+        """Posuvník 0–100 %. Po startu 55 %, stejně jako ve starším programu."""
+        box = tk.Frame(self.menu, bg="#1e1e1e")
+        box.pack(fill="x", padx=8, pady=(0, 8))
+        head = tk.Frame(box, bg="#1e1e1e")
+        head.pack(fill="x", pady=(2, 4))
+        tk.Label(
+            head, text="Hlasitost", font=("Segoe UI", 10),
+            fg="#d0d0d0", bg="#1e1e1e", anchor="w",
+        ).pack(side="left")
+        self._volume_value = tk.Label(
+            head, text=f"{self._volume} %", font=("Segoe UI", 10),
+            fg="white", bg="#1e1e1e", anchor="e",
+        )
+        self._volume_value.pack(side="right")
+        self._volume_track = tk.Canvas(
+            box, width=190, height=22, bg="#1e1e1e",
+            highlightthickness=0, bd=0, cursor="hand2",
+        )
+        self._volume_track.pack(fill="x")
+        self._volume_track.bind("<Configure>", lambda _event: self._paint_volume())
+        self._volume_track.bind("<Button-1>", self._volume_from_event)
+        self._volume_track.bind("<B1-Motion>", self._volume_from_event)
+        self._paint_volume()
+
+    def set_on_volume(self, callback) -> None:
+        self._on_volume = callback
+
+    def _volume_from_event(self, event) -> None:
+        width = self._volume_track.winfo_width()
+        if width <= 1:
+            width = 190
+        pad = 8
+        span = max(1, width - 2 * pad)
+        percent = int(round((event.x - pad) / span * 100))
+        percent = max(0, min(100, percent))
+        if percent == self._volume:
+            return
+        self._volume = percent
+        self._paint_volume()
+        if self._on_volume is not None:
+            self._on_volume(percent)
+
+    def _paint_volume(self) -> None:
+        canvas = self._volume_track
+        width = canvas.winfo_width()
+        if width <= 1:
+            width = 190
+        canvas.delete("all")
+        pad = 8
+        y = 11
+        canvas.create_line(pad, y, width - pad, y, fill="#2a2a2a", width=4, capstyle="round")
+        span = max(1, width - 2 * pad)
+        x = pad + int(span * self._volume / 100)
+        if self._volume:
+            canvas.create_line(pad, y, x, y, fill="#1565c0", width=4, capstyle="round")
+        canvas.create_oval(x - 7, y - 7, x + 7, y + 7, fill="white", outline="")
+        self._volume_value.configure(text=f"{self._volume} %")
 
     def set_speed(self, label: str, rate: int) -> None:
         self._speed_label = label

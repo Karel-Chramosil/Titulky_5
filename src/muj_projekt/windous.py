@@ -22,6 +22,7 @@ os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
 os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "30")
 
 import queue
+import re
 import sys
 import threading
 import time
@@ -217,6 +218,10 @@ class AudioCapture:
             self._stream = None
 
 
+# Dočasná paměť generování se maže dřív, než se po čtvrt hodině začne vracet originál.
+CONTEXT_RESET_SECONDS = 300
+
+
 class Translator:
     def __init__(self) -> None:
         import torch
@@ -225,8 +230,42 @@ class Translator:
         self.tokenizer = AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-600M", cache_dir=str(MODELS_DIR / "hf"))
         self.model = AutoModelForSeq2SeqLM.from_pretrained("facebook/nllb-200-distilled-600M", cache_dir=str(MODELS_DIR / "hf")).to(self.device)
         self.model.generation_config.max_length = None
+        self._context_at = time.monotonic()
+
+    def maybe_reset(self) -> None:
+        if time.monotonic() - self._context_at < CONTEXT_RESET_SECONDS:
+            return
+        self.reset_context()
+        log.warning("Vymazán dočasný stav překladu.")
+
+    def reset_context(self) -> None:
+        """Zahodí mezipaměť generování. Váhy modelu ani způsob překladu se nemění."""
+        import gc
+        import torch
+        if hasattr(self.model, "_previous_max_cache_length"):
+            delattr(self.model, "_previous_max_cache_length")
+        self.model.generation_config.max_length = None
+        lang = getattr(self.tokenizer, "src_lang", None)
+        if lang:
+            self.tokenizer.set_src_lang_special_tokens(lang)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self._context_at = time.monotonic()
 
     def translate(self, text: str, source_lang: str) -> str:
+        try:
+            result = self._generate(text, source_lang)
+        except Exception:
+            self.reset_context()
+            result = self._generate(text, source_lang)
+        if echoes_source(result, text):
+            log.warning("Překlad vrátil originál, mažu kontext a zkouším znovu.")
+            self.reset_context()
+            result = self._generate(text, source_lang)
+        return result
+
+    def _generate(self, text: str, source_lang: str) -> str:
         import torch
         src, _ = NLLB_SOURCES[source_lang]
         self.tokenizer.src_lang = src
@@ -234,7 +273,13 @@ class Translator:
         words = max(1, len(text.split()))
         token_limit = 64 if words <= 16 else min(160, 64 + (words - 16) * 3)
         with torch.no_grad():
-            out = self.model.generate(**ids, forced_bos_token_id=self.tokenizer.convert_tokens_to_ids(NLLB_TARGET), max_new_tokens=token_limit, num_beams=1, do_sample=False)
+            out = self.model.generate(
+                **ids,
+                forced_bos_token_id=self.tokenizer.convert_tokens_to_ids(NLLB_TARGET),
+                max_new_tokens=token_limit,
+                num_beams=1,
+                do_sample=False,
+            )
         return self.tokenizer.decode(out[0], skip_special_tokens=True).strip()
 
 
@@ -599,16 +644,27 @@ def _words(text: str) -> list[str]:
 
 
 def is_spelled_noise(text: str) -> bool:
-    """Whisper občas při šumu vyhláskuje jedno písmeno pořád dokola: E-E-E-E."""
-    parts = [part.strip(" .,!?:;\"'").upper() for part in text.replace("—", "-").split("-")]
+    """Whisper při šumu vyhláskuje písmena: E-E-E-E nebo E-N-O-S-T-O-S-T-E-N-G."""
+    parts = [part.strip(" .,!?:;\"'").upper() for part in text.replace("—", "-").replace("–", "-").split("-")]
     parts = [part for part in parts if part]
-    if len(parts) < 8:
+    if len(parts) < 6:
         return False
     letters = [part for part in parts if len(part) == 1 and part.isalpha()]
-    if len(letters) < len(parts) * 0.8:
+    return len(letters) >= 6 and len(letters) >= len(parts) * 0.8
+
+
+def is_repeated_characters(text: str) -> bool:
+    """Řada stejného znaku, třeba Sssssssss, není titulek."""
+    letters = [char for char in text.casefold() if char.isalpha()]
+    if len(letters) < 8:
         return False
-    top = max(letters.count(letter) for letter in set(letters))
-    return top >= 8 and top >= len(letters) * 0.7
+    run = 1
+    for previous, char in zip(letters, letters[1:]):
+        run = run + 1 if char == previous else 1
+        if run >= 8:
+            return True
+    top = max(letters.count(char) for char in set(letters))
+    return len(letters) >= 12 and top >= len(letters) * 0.85
 
 
 def is_filler_turn(text: str) -> bool:
@@ -618,7 +674,7 @@ def is_filler_turn(text: str) -> bool:
         return False
     body = raw[1:].strip() if raw.startswith("-") else raw
     parts = [part.strip() for part in body.split(" - ") if part.strip()]
-    if not parts:
+    if len(parts) < 2:
         return False
     for part in parts:
         words = _words(part)
@@ -632,7 +688,91 @@ def is_filler_turn(text: str) -> bool:
 
 
 def is_skipped_caption(text: str) -> bool:
-    return is_spelled_noise(text) or is_filler_turn(text)
+    if is_spelled_noise(text) or is_filler_turn(text) or is_repeated_characters(text):
+        return True
+    words = _words(text)
+    return len(words) == 1 and len(words[0]) == 1
+
+
+_REPEAT_JOIN = {"a", "and", "i", "for", "pro"}
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def collapse_repeated_words(text: str) -> str:
+    """Z opakovaného slova nebo slovního spojení nechá jen první."""
+    spans = [(match.start(), match.end()) for match in _WORD_RE.finditer(text)]
+    if len(spans) < 2:
+        return text.strip()
+    keep = [True] * len(spans)
+    words = [text[start:end].casefold() for start, end in spans]
+
+    def drop(indexes: range) -> None:
+        for index in indexes:
+            keep[index] = False
+
+    changed = True
+    while changed:
+        changed = False
+        visible = [index for index, shown in enumerate(keep) if shown]
+        for left, right in zip(visible, visible[1:]):
+            if words[left] == words[right]:
+                drop(range(right, right + 1))
+                changed = True
+                break
+        if changed:
+            continue
+        for left, mid, right in zip(visible, visible[1:], visible[2:]):
+            if words[mid] in _REPEAT_JOIN and words[left] == words[right]:
+                drop(range(mid, right + 1))
+                changed = True
+                break
+        if changed:
+            continue
+        visible_words = [words[index] for index in visible]
+        for size in range(min(6, len(visible_words) // 2), 1, -1):
+            for index in range(0, len(visible_words) - 2 * size + 1):
+                if visible_words[index:index + size] != visible_words[index + size:index + 2 * size]:
+                    continue
+                start = visible[index + size]
+                end = visible[index + 2 * size - 1]
+                drop(range(start, end + 1))
+                changed = True
+                break
+            if changed:
+                break
+    if all(keep):
+        return text.strip()
+    kept = [text[start:end] for index, (start, end) in enumerate(spans) if keep[index]]
+    if not kept:
+        return ""
+    prefix = "- " if text.lstrip().startswith("-") else ""
+    last_kept = max(index for index, shown in enumerate(keep) if shown)
+    ending = ""
+    for char in text[spans[last_kept][1]:]:
+        if char in ".!?…":
+            ending = char
+    return f"{prefix}{' '.join(kept)}{ending}".strip()
+
+
+def echoes_source(translated: str, source: str) -> bool:
+    """Delší věta, kterou model jen opsal, není český titulek."""
+    left = " ".join(_words(translated))
+    right = " ".join(_words(source))
+    return bool(right) and len(right.split()) >= 4 and left == right
+
+
+class RecentCaptions:
+    """Stejný text projde jen poprvé. Další stejná slova se už neukážou."""
+
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+
+    def accept(self, _start: float, text: str) -> bool:
+        key = " ".join(_words(text))
+        if not key or key in self._seen:
+            return False
+        self._seen.add(key)
+        return True
 
 
 class ChunkSeconds:
@@ -653,7 +793,9 @@ class ChunkSeconds:
 
 def run_processing(cap, translator, srt, original, lang_arg, model, audio: AudioBuffer, subtitle_queue: queue.Queue, chunk_seconds: ChunkSeconds):
     origin: float | None = None
-    locked_lang = lang_arg
+    locked_lang = lang_arg if lang_arg in NLLB_SOURCES else None
+    heard = RecentCaptions()
+    shown_recent = RecentCaptions()
     try:
         while True:
             seconds = float(chunk_seconds.get())
@@ -661,6 +803,7 @@ def run_processing(cap, translator, srt, original, lang_arg, model, audio: Audio
             if item is None:
                 time.sleep(0.05)
                 continue
+            translator.maybe_reset()
             chunk, first_at = item
             if origin is None:
                 origin = first_at
@@ -676,16 +819,21 @@ def run_processing(cap, translator, srt, original, lang_arg, model, audio: Audio
                     without_timestamps=False,
                     word_timestamps=False,
                     condition_on_previous_text=False,
+                    initial_prompt=None,
                 )
             except Exception as exc:
                 log.error("Přepis selhal: %s", exc)
                 continue
             if locked_lang is None and (getattr(info, "language_probability", 0) or 0) >= 0.6:
-                locked_lang = (info.language or "").lower() or None
+                candidate = (info.language or "").lower()
+                if candidate in NLLB_SOURCES:
+                    locked_lang = candidate
+                    log.warning("Jazyk přepisu: %s", locked_lang)
             detected = (locked_lang or (info.language or "")).lower()
+            source = detected if detected in NLLB_SOURCES else None
             chunk_end = offset + len(chunk) / TARGET_RATE
             for seg in segments:
-                text = (seg.text or "").strip()
+                text = collapse_repeated_words((seg.text or "").strip())
                 if not text or is_skipped_caption(text):
                     if text:
                         log.warning("Přeskočen přelud přepisu: %s", text[:80])
@@ -694,13 +842,22 @@ def run_processing(cap, translator, srt, original, lang_arg, model, audio: Audio
                 end = min(chunk_end, offset + float(seg.end))
                 if end <= start:
                     end = start + 0.4
-                try:
-                    translated = translator.translate(text, detected) if detected in NLLB_SOURCES else text
-                except Exception as exc:
-                    log.error("Překlad selhal: %s", exc)
-                    translated = text
-                shown = translated or text
-                if is_skipped_caption(shown):
+                if not heard.accept(start, text):
+                    log.warning("Přeskočeno opakování: %s", text[:80])
+                    continue
+                if source is None:
+                    shown = text
+                else:
+                    try:
+                        shown = translator.translate(text, source) or text
+                    except Exception as exc:
+                        log.error("Překlad selhal: %s", exc)
+                        continue
+                    if echoes_source(shown, text):
+                        log.warning("Překlad zůstal v originále: %s", text[:80])
+                        continue
+                shown = collapse_repeated_words(shown)
+                if not shown or is_skipped_caption(shown) or not shown_recent.accept(start, shown):
                     log.warning("Přeskočen přelud přepisu: %s", shown[:80])
                     continue
                 srt.add(start, end, shown)
@@ -724,8 +881,9 @@ class CzechReader:
         self.on_frame = on_frame
         self.overlay = overlay
         self.speaker = Speaker()
-        self.speaker.set_rate(3)
+        self.speaker.set_rate(6)
         self.overlay.set_on_speed(self.speaker.set_rate)
+        self.overlay.set_on_volume(self.speaker.set_volume)
         self.enabled = False
         self._last = ""
         self._generation = 0
